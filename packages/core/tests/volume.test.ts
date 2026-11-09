@@ -217,7 +217,7 @@ describe('live scene', () => {
 
   it('keeps every part core when small sizes thin out the slices', () => {
     const chat = getExample('chat')!;
-    expect(sceneFrame(chat, { size: 32, reducedMotion: true, view: { yaw: 0.3, pitch: -0.2 } }).slices.some(Boolean)).toBe(true);
+    expect(sceneFrame(chat, { size: 32, reducedMotion: true, view: { yaw: 0.3, pitch: -0.2 } }).slices.z.some(Boolean)).toBe(true);
     for (const e of examples) {
       const cores: number[] = [];
       buildVolume(e).parts.reduce((at, part) => {
@@ -227,7 +227,7 @@ describe('live scene', () => {
       for (const size of [16, 32, 64]) {
         for (const [yaw, pitch] of [[0.3, -0.2], [0.3, 0], [0, 0.2], [0.6, 0.3]]) {
           const frame = sceneFrame(e, { size, reducedMotion: true, view: { yaw, pitch } });
-          if (frame.stack === 'z') for (const i of cores) expect(frame.slices[i], `${e.id} ${size}px`).toBe(true);
+          if (frame.stack === 'z') for (const i of cores) expect(frame.slices.z[i], `${e.id} ${size}px`).toBe(true);
         }
       }
     }

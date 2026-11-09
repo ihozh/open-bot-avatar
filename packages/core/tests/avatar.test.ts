@@ -88,7 +88,7 @@ describe('validateAvatar', () => {
     expect(errorsOf({ ...clone(controller), color: '#f00' }).join()).toMatch(/unknown field "color"/);
     expect(errorsOf({ ...clone(controller), body: { path: controller.body.path, fill: 'red' } }).join()).toMatch(/body.fill/);
     expect(errorsOf(null)).not.toEqual([]);
-    expect(errorsOf({ ...clone(controller), version: 2 }).join()).toMatch(/version/);
+    expect(errorsOf({ ...clone(controller), version: 3 }).join()).toMatch(/version/);
     expect(errorsOf({ ...clone(controller), id: 'Has Spaces' }).join()).toMatch(/id/);
   });
 

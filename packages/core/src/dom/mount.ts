@@ -82,7 +82,7 @@ function mountScene(el: HTMLElement, definition: AvatarDefinition, depth: number
     view: q('[data-view]'),
     stacks,
     // Slices sit inside per-part wrappers (which carry v2 depth frames), in the same order as the frame lists them.
-    slices: { z: [...stacks.z.querySelectorAll('svg')] as HTMLElement[], x: [...stacks.x.querySelectorAll('svg')] as HTMLElement[] },
+    slices: { z: [...stacks.z.querySelectorAll('svg')] as unknown as HTMLElement[], x: [...stacks.x.querySelectorAll('svg')] as unknown as HTMLElement[] },
     eyes: [0, 1].map((i) => {
       const root = q(`[data-eye="${i}"]`);
       return { root, pill: root.querySelector('i') as HTMLElement, arc: root.querySelector('svg') as unknown as HTMLElement };

@@ -118,7 +118,9 @@ export function Docs() {
       <p>
         One path in a <code>0 0 100 100</code> box, and the eyes: their center, spacing and scale. Check any definition you didn't{" "}
         write with <code>validateAvatar</code>. The rules are in the{" "}
-        <a href={`${REPO}/blob/main/docs/avatar-contract.md`}>contract</a>.
+        <a href={`${REPO}/blob/main/docs/avatar-contract.md`}>contract</a>. Version 2 adds an optional <code>parts</code> array that
+        moves each outline subpath in depth (<code>z</code>) and tilts it (<code>pitch</code>, <code>yaw</code> about a <code>pivot</code>);
+        without it a v2 definition renders exactly like v1.
       </p>
       <Code snippet="definition" language="JSON" />
 
