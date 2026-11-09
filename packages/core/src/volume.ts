@@ -27,9 +27,15 @@ import type { AvatarDefinition, AvatarEyes } from './types.ts';
 
 export type PartKind = 'inflate' | 'revolve-x' | 'revolve-y';
 
+/** The three families of cross-section planes a part can be drawn with. */
+export type Stack = 'z' | 'x' | 'y';
+
 export interface VolumeSlice {
-  /** 'z': the plane z = at, path in (x, y). 'x': the plane x = at, path in (u = -z, y). */
-  axis: 'z' | 'x';
+  /**
+   * 'z': the plane z = at, path in (x, y). 'x': the plane x = at, path in (u = -z, y).
+   * 'y': the plane y = at, path in (x, w = -z); built only for parts tipped by a v2 pitch.
+   */
+  axis: Stack;
   at: number;
   d: string;
   /** The same cross-section as polygons in its plane's coordinates (`d` is a rounded serialization of them). */
@@ -72,6 +78,8 @@ export interface VolumePart {
   axis?: number;
   zSlices: VolumeSlice[];
   xSlices: VolumeSlice[];
+  /** Horizontal cross-sections; empty unless the part's frame has a pitch. */
+  ySlices: VolumeSlice[];
   /** Front surface height at a point, 0 outside the part. */
   height: (x: number, y: number) => number;
 }
@@ -478,6 +486,42 @@ function columnLoops(g: Grid, c0: number, c1: number, edgeHeight: (x: number, y:
   return loops;
 }
 
+/** The horizontal counterpart of columnLoops: the outline of rows r0..r1 seen from above, in (x, w = -z). */
+function rowLoops(g: Grid, r0: number, r1: number, edgeHeight: (x: number, y: number) => number): Point[][] {
+  const loops: Point[][] = [];
+  const sd = new Float64Array(g.nx).fill(-Infinity), h = new Float64Array(g.nx);
+  for (let i = 0; i < g.nx; i++) {
+    for (let r = r0; r <= r1; r++) {
+      const k = r * g.nx + i;
+      if (g.sd[k] > sd[i]) sd[i] = g.sd[k];
+      if (g.sd[k] > 0 && g.h[k] > h[i]) h[i] = g.h[k];
+    }
+  }
+  const xAt = (ii: number) => g.x0 + ii * g.step;
+  const edge = (inside: number, outside: number) => xAt(inside) + ((xAt(outside) - xAt(inside)) * sd[inside]) / (sd[inside] - sd[outside]);
+  const rim = (x: number, i: number) => {
+    let top = 0;
+    for (let r = r0; r <= r1; r++) top = Math.max(top, edgeHeight(x, g.y0 + r * g.step));
+    return Math.min(h[i], top);
+  };
+  let i = 0;
+  while (i < g.nx) {
+    if (sd[i] <= 0) { i++; continue; }
+    const i0 = i;
+    while (i < g.nx && sd[i] > 0) i++;
+    const i1 = i - 1;
+    const xL = i0 > 0 ? edge(i0, i0 - 1) : xAt(i0);
+    const xR = i1 < g.nx - 1 ? edge(i1, i1 + 1) : xAt(i1);
+    const back: Point[] = [[xL, i0 > 0 ? rim(xL, i0) : h[i0]]];
+    for (let k = i0; k <= i1; k++) back.push([xAt(k), h[k]]);
+    back.push([xR, i1 < g.nx - 1 ? rim(xR, i1) : h[i1]]);
+    if (Math.max(...back.map((p) => p[1])) < 0.05) continue;
+    const front = back.map(([x, w]) => [x, -w] as Point).reverse();
+    loops.push(simplifyLoop([...back, ...front], 0.04));
+  }
+  return loops;
+}
+
 /** Depth levels in (flat, flat + round): even in angle over the rounded part of the profile. */
 function levels(flat: number, round: number, steps: number): number[] {
   const out: number[] = [];
@@ -549,6 +593,7 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
     };
     const zSlices: VolumeSlice[] = [core];
     const xSlices: VolumeSlice[] = [];
+    const ySlices: VolumeSlice[] = [];
     const half = depth / 2;
     if (half > 0.05) {
       const g = sampleGrid(polys, b, step, heightOf);
@@ -588,12 +633,23 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
         const loops = columnLoops(g, Math.max(0, i - before), Math.min(g.nx - 1, i - before + every - 1), edgeHeight);
         if (loops.length) xSlices.push({ axis: 'x', at: g.x0 + i * g.step, d: loopsToPath(loops), loops, evenOdd: true, box: loopBox(loops), inset: 0 });
       }
+
+      // A tipped part turns its z- and x-planes edge-on together; horizontal planes keep it solid.
+      if (frame.pitch !== 0) {
+        const tall = b.maxY - b.minY;
+        const everyRow = Math.max(1, Math.round(Math.max(1.1, tall / MAX_X_SLICES) / g.step));
+        const beforeRow = Math.floor((everyRow - 1) / 2);
+        for (let j = 1; j < g.ny - 1; j += everyRow) {
+          const loops = rowLoops(g, Math.max(0, j - beforeRow), Math.min(g.ny - 1, j - beforeRow + everyRow - 1), edgeHeight);
+          if (loops.length) ySlices.push({ axis: 'y', at: g.y0 + j * g.step, d: loopsToPath(loops), loops, evenOdd: true, box: loopBox(loops), inset: 0 });
+        }
+      }
     }
 
     return {
       kind, frame, d: core.d, polys, bounds: b, center, thickness, depth, rxy, rz,
       axis: kind === 'revolve-x' ? (xAxis as number) : kind === 'revolve-y' ? center[0] : undefined,
-      zSlices, xSlices, height,
+      zSlices, xSlices, ySlices, height,
     };
   });
 

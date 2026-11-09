@@ -17,6 +17,7 @@ import { createAnimator } from '../animator.ts';
 import { pointerGaze } from '../follow.ts';
 import { DEFAULT_COLOR, DEFAULT_EYE_COLOR, liveFrame, renderAvatarScene, renderAvatarSvg, sceneFrame, type SceneFrame } from '../render.ts';
 import type { AvatarDefinition, AvatarMotion, RenderOptions } from '../types.ts';
+import type { Stack } from '../volume.ts';
 import { requestFrame, subscribeFrames } from './clock.ts';
 import { canvasSupported, mountCanvas, paintCanvas, type CanvasSurface } from './paint.ts';
 import { trackPointer } from './pointer.ts';
@@ -65,8 +66,8 @@ interface Scene {
   geometry: string;
   motion: HTMLElement;
   view: HTMLElement;
-  stacks: Record<'z' | 'x', HTMLElement>;
-  slices: Record<'z' | 'x', HTMLElement[]>;
+  stacks: Record<Stack, HTMLElement>;
+  slices: Record<Stack, HTMLElement[]>;
   eyes: { root: HTMLElement; pill: HTMLElement; arc: HTMLElement }[];
   last: Record<string, string>;
 }
@@ -74,7 +75,7 @@ interface Scene {
 function mountScene(el: HTMLElement, definition: AvatarDefinition, depth: number | undefined): Scene {
   el.innerHTML = renderAvatarScene(definition, { depth });
   const q = (s: string) => el.querySelector(s) as HTMLElement;
-  const stacks = { z: q('[data-stack="z"]'), x: q('[data-stack="x"]') };
+  const stacks = { z: q('[data-stack="z"]'), x: q('[data-stack="x"]'), y: q('[data-stack="y"]') };
   return {
     key: q('[data-avatar-scene]').dataset.avatarScene ?? '',
     geometry: geometryKey(definition),
@@ -82,7 +83,11 @@ function mountScene(el: HTMLElement, definition: AvatarDefinition, depth: number
     view: q('[data-view]'),
     stacks,
     // Slices sit inside per-part wrappers (which carry v2 depth frames), in the same order as the frame lists them.
-    slices: { z: [...stacks.z.querySelectorAll('svg')] as unknown as HTMLElement[], x: [...stacks.x.querySelectorAll('svg')] as unknown as HTMLElement[] },
+    slices: {
+      z: [...stacks.z.querySelectorAll('svg')] as unknown as HTMLElement[],
+      x: [...stacks.x.querySelectorAll('svg')] as unknown as HTMLElement[],
+      y: [...stacks.y.querySelectorAll('svg')] as unknown as HTMLElement[],
+    },
     eyes: [0, 1].map((i) => {
       const root = q(`[data-eye="${i}"]`);
       return { root, pill: root.querySelector('i') as HTMLElement, arc: root.querySelector('svg') as unknown as HTMLElement };
@@ -103,7 +108,7 @@ function apply(m: Scene, frame: SceneFrame) {
   put(m, 'view', m.view, 'transform', frame.view);
   // display:none, not visibility: hidden slices would still each hold a 3D layer. Each part shows one
   // stack, so both stack containers stay mounted and every slice is switched on its own.
-  for (const axis of ['z', 'x'] as const) {
+  for (const axis of ['z', 'x', 'y'] as const) {
     const slices = m.slices[axis];
     frame.slices[axis].forEach((shown, i) => slices[i] && put(m, `${axis}${i}`, slices[i], 'display', shown ? 'block' : 'none'));
   }

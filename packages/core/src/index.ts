@@ -10,6 +10,7 @@ export {
   DEFAULT_EYE_COLOR,
 } from './render.ts';
 export type { AvatarFrame, EyeMark, FramePath, FrameShape, Matrix, PartProjection, SceneFrame } from './render.ts';
+export type { Stack } from './volume.ts';
 export { BASE_PITCH, BASE_YAW, blendPoses, computePose } from './motion.ts';
 export type { Pose, PoseInput } from './motion.ts';
 export { MOOD_MS, moodProgress, settleMood } from './mood.ts';

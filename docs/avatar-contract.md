@@ -40,7 +40,8 @@ Version 1 places every part on one mid-plane (z = 0), so a body can only be as d
 - `z` (−30..30): offset of the part's own mid-plane toward the viewer.
 - `pitch`, `yaw` (degrees, −75..75): tilt about the part's horizontal / vertical axis through `pivot`. Positive `pitch` leans the part's top toward the viewer; positive `yaw` brings its right edge toward the viewer. `pivot` defaults to the part's bounding-box center; put it on the joint where the part meets its neighbour so the join stays closed.
 - The eyes ride on whichever part is highest under them once `z` is counted, and move with that part's frame.
-- Renderers (`avatarFrame`, `renderAvatarSvg`, the CSS scene) pick the slice stack per part, so a tilted part still shows a solid silhouette from every view. `avatarExtent` grows to hold the offset parts.
+- Renderers (`avatarFrame`, `renderAvatarSvg`, the CSS scene) pick the slice stack per part, so a tilted part still shows a solid silhouette from every view. A part with a `pitch` also gets horizontal (y-plane) cross-sections, because its z- and x-planes turn edge-on together once it leans far forward. `avatarExtent` grows to hold the offset parts.
+- A part is still one flat shape turned in space. To make something curve toward the viewer, chain parts: the ram's horn is a frontal spiral plus a separate tip part pitched −72° at the spiral's end.
 
 Before rendering imported definitions, call `validateAvatar`. It returns `{ ok: true, value }` with the normalized definition or `{ ok: false, errors }` with validation errors.
 

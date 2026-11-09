@@ -23,7 +23,7 @@ import type { Bounds, Point } from './path.ts';
 import { EYE_H, EYE_W, GAZE_X, GAZE_Y, HAPPY_ARC, analyzeBody, eyeCenters, gazeRange, validateAvatar } from './validate.ts';
 import type { GazeRange } from './validate.ts';
 import { buildVolume } from './volume.ts';
-import type { PartFrame, Volume, VolumeSlice } from './volume.ts';
+import type { PartFrame, Stack, Volume, VolumeSlice } from './volume.ts';
 import type { AvatarDefinition, RenderOptions } from './types.ts';
 
 export const DEFAULT_COLOR = '#ff6a1a';
@@ -167,10 +167,10 @@ export function activeStack(v: ViewBasis): 'z' | 'x' {
 export interface PartProjection {
   l: [number, number, number, number, number, number, number, number, number];
   t: [number, number, number];
-  stack: 'z' | 'x';
+  stack: Stack;
 }
 
-export function partProjection(v: ViewBasis, pivot: Point, frame?: PartFrame): PartProjection {
+export function partProjection(v: ViewBasis, pivot: Point, frame?: PartFrame, hasY = false): PartProjection {
   const [cx, cy] = pivot;
   // View rotation rows (model → screen x, screen y, depth), as planeMatrix/projectPoint use them.
   const V = [
@@ -204,8 +204,10 @@ export function partProjection(v: ViewBasis, pivot: Point, frame?: PartFrame): P
     V[6] * wx + V[7] * wy + V[8] * wz,
   ];
   const l = L as PartProjection['l'];
-  // The stack whose planes face the viewer more: compare the screen footprint of the local x and z axes.
-  const stack = Math.abs(l[0]) + Math.abs(l[3]) >= Math.abs(l[2]) + Math.abs(l[5]) ? 'z' : 'x';
+  // The stack whose planes face the viewer most: the plane normal with the largest toward-viewer component
+  // (local z for z-planes, x for x-planes, y for the y-planes a tipped part carries).
+  const fz = Math.abs(l[8]), fx = Math.abs(l[6]), fy = hasY ? Math.abs(l[7]) : -1;
+  const stack: Stack = fy > fz && fy > fx ? 'y' : fz >= fx ? 'z' : 'x';
   return { l, t, stack };
 }
 
@@ -225,6 +227,12 @@ export function partZPlane(P: PartProjection, at: number): M {
 export function partXPlane(P: PartProjection, at: number): M {
   const { l, t } = P;
   return [-l[2], -l[5], l[1], l[4], l[0] * at + t[0], l[3] * at + t[1]];
+}
+
+/** Projection of the part's horizontal plane at local y = `at`, whose path coordinates are (x, w = −z). */
+export function partYPlane(P: PartProjection, at: number): M {
+  const { l, t } = P;
+  return [l[0], l[3], -l[2], -l[5], l[1] * at + t[0], l[4] * at + t[1]];
 }
 
 /** Depth toward the viewer of a local point. */
@@ -254,7 +262,7 @@ function partCull(P: PartProjection): (s: VolumeSlice) => boolean {
 /** Projections of every part under one view. */
 function partProjections(vol: Volume, v: ViewBasis): PartProjection[] {
   const pivot = pivotOf(vol.bounds);
-  return vol.parts.map((part) => partProjection(v, pivot, part.frame));
+  return vol.parts.map((part) => partProjection(v, pivot, part.frame, part.ySlices.length > 0));
 }
 
 /**
@@ -325,26 +333,35 @@ function drawnSlices(
   p: Prepared,
   v: ViewBasis,
   size: number | undefined,
-  visit: (s: VolumeSlice, m: M, part: number, index: number, stack: 'z' | 'x', P: PartProjection) => void,
+  visit: (s: VolumeSlice, m: M, part: number, index: number, stack: Stack, P: PartProjection) => void,
 ): PartProjection[] {
   const { vol } = p;
   const projections = partProjections(vol, v);
   // Each part picks its own stack (a tilted v2 part may face the viewer differently from the body).
-  const kept = { z: sliceDetail(p, 'z', size), x: sliceDetail(p, 'x', size) };
-  const offset = { z: 0, x: 0 };
+  const kept = { z: sliceDetail(p, 'z', size), x: sliceDetail(p, 'x', size), y: sliceDetail(p, 'y', size) };
+  const offset = { z: 0, x: 0, y: 0 };
   vol.parts.forEach((part, i) => {
     const P = projections[i];
     const drawn = partCull(P);
-    const slices = P.stack === 'z' ? part.zSlices : part.xSlices;
+    const slices = stackSlices(part, P.stack);
     const base = offset[P.stack];
     slices.forEach((s, j) => {
       if (!kept[P.stack][base + j] || !drawn(s)) return;
-      visit(s, P.stack === 'z' ? partZPlane(P, s.at) : partXPlane(P, s.at), i, j, P.stack, P);
+      visit(s, slicePlane(P, s), i, j, P.stack, P);
     });
     offset.z += part.zSlices.length;
     offset.x += part.xSlices.length;
+    offset.y += part.ySlices.length;
   });
   return projections;
+}
+
+function stackSlices(part: Volume['parts'][number], stack: Stack): VolumeSlice[] {
+  return stack === 'z' ? part.zSlices : stack === 'x' ? part.xSlices : part.ySlices;
+}
+
+function slicePlane(P: PartProjection, s: VolumeSlice): M {
+  return s.axis === 'z' ? partZPlane(P, s.at) : s.axis === 'x' ? partXPlane(P, s.at) : partYPlane(P, s.at);
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +502,7 @@ function flatFrame(definition: AvatarDefinition, options: RenderOptions, size: n
     }
     // Depth keys are taken under the eyes for the eye part, so only depth decides eye-vs-body order there.
     const [rx, ry] = i === vol.eyePart ? eyesMid : vol.parts[i].center;
-    const depth = stack === 'z' ? partDepth(P, [rx, ry, s.at]) : partDepth(P, [s.at, ry, 0]);
+    const depth = stack === 'z' ? partDepth(P, [rx, ry, s.at]) : stack === 'x' ? partDepth(P, [s.at, ry, 0]) : partDepth(P, [rx, s.at, 0]);
     items.push({ depth, shape: { kind: 'slice', key: `${i}${stack}${j}`, path: path.id, matrix: m } });
   });
   // Painted on the surface of the host part; each eye goes once the surface under it turns away.
@@ -547,8 +564,11 @@ function sliceMarkup(s: VolumeSlice): string {
   const rule = s.evenOdd ? ' fill-rule="evenodd"' : '';
   const place = s.axis === 'z'
     ? `left:${u(x)};top:${u(y)};transform:translateZ(${u(s.at)})`
-    : // The side plane's u = 0 line sits at x = s.at; turning it 90° about that line maps u to -z.
-      `left:${u(s.at + x)};top:${u(y)};transform-origin:${u(-x)} 50%;transform:rotateY(90deg)`;
+    : s.axis === 'x'
+      ? // The side plane's u = 0 line sits at x = s.at; turning it 90° about that line maps u to -z.
+        `left:${u(s.at + x)};top:${u(y)};transform-origin:${u(-x)} 50%;transform:rotateY(90deg)`
+      : // The horizontal plane's w = 0 line sits at y = s.at; turning it -90° about that line maps w to -z.
+        `left:${u(x)};top:${u(s.at + y)};transform-origin:50% ${u(-y)};transform:rotateX(-90deg)`;
   return (
     `<svg viewBox="${f(x)} ${f(y)} ${f(w)} ${f(h)}" style="position:absolute;width:${u(w)};height:${u(h)};overflow:visible;${place}" aria-hidden="true">` +
     `<path d="${s.d}"${rule} fill="currentColor"/></svg>`
@@ -571,12 +591,12 @@ export function renderAvatarScene(definition: AvatarDefinition, options: Pick<Re
     frame.moved
       ? `transform-origin:${u(frame.pivot[0])} ${u(frame.pivot[1])} 0;transform:translateZ(${u(frame.z)}) rotateY(${r4(-frame.yaw)}rad) rotateX(${r4(-frame.pitch)}rad)`
       : '';
-  const stack = (axis: 'z' | 'x') =>
+  const stack = (axis: Stack) =>
     `<div data-stack="${axis}" style="${FILL}transform-style:preserve-3d">` +
     vol.parts
       .map((part, i) =>
         `<div data-part="${i}" style="${FILL}transform-style:preserve-3d;${partStyle(part.frame)}">` +
-        (axis === 'z' ? part.zSlices : part.xSlices).map(sliceMarkup).join('') +
+        stackSlices(part, axis).map(sliceMarkup).join('') +
         `</div>`)
       .join('') +
     `</div>`;
@@ -596,7 +616,7 @@ export function renderAvatarScene(definition: AvatarDefinition, options: Pick<Re
     // will-change pins the slices' raster scale: without it every hop and squash re-rasterizes each slice.
     `<div data-motion style="${FILL}will-change:transform;transform-origin:${u((b.minX + b.maxX) / 2)} ${u(b.maxY)}">` +
     `<div data-view style="${FILL}transform-style:preserve-3d;transform-origin:${u(cx)} ${u(cy)}">` +
-    stack('z') + stack('x') +
+    stack('z') + stack('x') + stack('y') +
     // The eyes ride in the host part's frame.
     `<div data-eyes style="${FILL}transform-style:preserve-3d;${host ? partStyle(host.frame) : ''}">${eyes.join('')}</div>` +
     `</div></div></div>`
@@ -613,7 +633,7 @@ export interface SceneFrame {
   /** The stack the body as a whole faces the viewer with (v1 behaviour; each part may pick its own). */
   stack: 'z' | 'x';
   /** Per slice of each stack, in markup order: whether it shows. Hidden ones need no layer. */
-  slices: Record<'z' | 'x', boolean[]>;
+  slices: Record<Stack, boolean[]>;
   eyes: { visible: boolean; happy: boolean; transform: string; pill: string }[];
 }
 
@@ -627,14 +647,14 @@ const SLICE_GAP_PX = 0.75;
  * slices closer than SLICE_GAP_PX to the last kept one are dropped; the outermost always stay, and
  * so does the core, which sliceCull relies on to cover the inset slices it hides.
  */
-function sliceDetail(p: Prepared, stack: 'z' | 'x', size: number | undefined): boolean[] {
+function sliceDetail(p: Prepared, stack: Stack, size: number | undefined): boolean[] {
   const px = Number.isFinite(size) && (size as number) > 0 ? Math.round(size as number) : 0;
   const key = `${stack}${px}`;
   let keep = p.detail.get(key);
   if (keep) return keep;
   const gap = px ? (SLICE_GAP_PX * 100) / px : 0;
   keep = p.vol.parts.flatMap((part) => {
-    const slices = stack === 'z' ? part.zSlices : part.xSlices;
+    const slices = stackSlices(part, stack);
     let last = -Infinity;
     return slices.map((s, j) => {
       const core = s.axis === 'z' && s.at === 0 && s.inset === 0;
@@ -655,14 +675,14 @@ export function sceneFrame(definition: AvatarDefinition, options: RenderOptions 
   const v = viewBasis(pose.yaw, pose.pitch);
   const states = eyeStates(p, pose);
   const projections = partProjections(p.vol, v);
-  const kept = { z: sliceDetail(p, 'z', options.size), x: sliceDetail(p, 'x', options.size) };
-  const k = { z: 0, x: 0 };
-  const slices: Record<'z' | 'x', boolean[]> = { z: [], x: [] };
+  const kept = { z: sliceDetail(p, 'z', options.size), x: sliceDetail(p, 'x', options.size), y: sliceDetail(p, 'y', options.size) };
+  const k = { z: 0, x: 0, y: 0 };
+  const slices: Record<Stack, boolean[]> = { z: [], x: [], y: [] };
   p.vol.parts.forEach((part, i) => {
     const P = projections[i];
     const drawn = partCull(P);
-    for (const axis of ['z', 'x'] as const) {
-      const own = axis === 'z' ? part.zSlices : part.xSlices;
+    for (const axis of ['z', 'x', 'y'] as const) {
+      const own = stackSlices(part, axis);
       for (const s of own) {
         const keep = kept[axis][k[axis]++];
         slices[axis].push(axis === P.stack && keep && drawn(s));
