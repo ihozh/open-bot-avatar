@@ -533,11 +533,24 @@ function levels(flat: number, round: number, steps: number): number[] {
 export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysis = analyzeBody(def.body.path)): Volume {
   const outlines = body.subpaths.filter((s) => !s.hole);
   const holes = body.subpaths.filter((s) => s.hole);
+  // Each hole cuts one part: the smallest outline that contains it (a ring in front of a larger
+  // part must not punch through that part as well).
+  const boxArea = (polys: Point[][]) => { const b = bounds(polys); return (b.maxX - b.minX) * (b.maxY - b.minY); };
+  const owner = holes.map((h) => {
+    if (!h.probe) return -1;
+    let best = -1, bestArea = Infinity;
+    outlines.forEach((o, i) => {
+      if (!isInside(o.polys, (h.probe as Point)[0], (h.probe as Point)[1])) return;
+      const a = boxArea(o.polys);
+      if (a < bestArea) { bestArea = a; best = i; }
+    });
+    return best;
+  });
   const v = Number.isFinite(volume) ? Math.max(0, volume) : 1;
   const xAxis = revolveAxis(body);
 
   const parts: VolumePart[] = outlines.map((o, index) => {
-    const cuts = holes.filter((h) => h.probe && isInside(o.polys, h.probe[0], h.probe[1]));
+    const cuts = holes.filter((_, k) => owner[k] === index);
     const polys = [...o.polys, ...cuts.flatMap((h) => h.polys)];
     const b = bounds(o.polys);
     const center: Point = [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2];
