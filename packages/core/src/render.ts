@@ -76,7 +76,7 @@ function prepare(definition: AvatarDefinition, depth: number): Prepared {
   const vol = buildVolume(def, depth / DEFAULT_DEPTH, body);
   const id = `oba-${hashString(`${def.id}|${def.body.path}|${def.parts ? JSON.stringify(def.parts) : ''}|${depth}`).toString(36)}`;
   const ids = new Map<string, string>();
-  for (const part of vol.parts) for (const s of [...part.zSlices, ...part.xSlices]) if (!ids.has(s.d)) ids.set(s.d, `${id}-${ids.size}`);
+  for (const part of vol.parts) for (const s of [...part.zSlices, ...part.xSlices, ...part.ySlices]) if (!ids.has(s.d)) ids.set(s.d, `${id}-${ids.size}`);
   const prepared: Prepared = {
     def,
     vol,
