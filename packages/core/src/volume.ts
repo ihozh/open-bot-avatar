@@ -42,8 +42,20 @@ export interface VolumeSlice {
   inset: number;
 }
 
+/** A part's resolved placement in model space (v1 parts: all zeros, pivot at the part center). Angles in radians. */
+export interface PartFrame {
+  z: number;
+  yaw: number;
+  pitch: number;
+  pivot: Point;
+  /** True when the frame differs from the v1 default. */
+  moved: boolean;
+}
+
 export interface VolumePart {
   kind: PartKind;
+  /** Where the part sits: its local z = 0 mid-plane is placed at frame.z and turned about frame.pivot. */
+  frame: PartFrame;
   /** Outline plus the holes that cut it, serialized. */
   d: string;
   polys: Point[][];
@@ -480,11 +492,20 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
   const v = Number.isFinite(volume) ? Math.max(0, volume) : 1;
   const xAxis = revolveAxis(body);
 
-  const parts: VolumePart[] = outlines.map((o) => {
+  const parts: VolumePart[] = outlines.map((o, index) => {
     const cuts = holes.filter((h) => h.probe && isInside(o.polys, h.probe[0], h.probe[1]));
     const polys = [...o.polys, ...cuts.flatMap((h) => h.polys)];
     const b = bounds(o.polys);
     const center: Point = [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2];
+    const given = def.version === 2 ? def.parts?.[index] : undefined;
+    const rad = Math.PI / 180;
+    const frame: PartFrame = {
+      z: given?.z ?? 0,
+      yaw: (given?.yaw ?? 0) * rad,
+      pitch: (given?.pitch ?? 0) * rad,
+      pivot: given?.pivot ? [given.pivot[0], given.pivot[1]] : center,
+      moved: !!given && ((given.z ?? 0) !== 0 || (given.yaw ?? 0) !== 0 || (given.pitch ?? 0) !== 0),
+    };
     const minDim = Math.min(b.maxX - b.minX, b.maxY - b.minY);
     const step = Math.max(0.25, Math.min(0.45, minDim / 24));
 
@@ -570,20 +591,20 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
     }
 
     return {
-      kind, d: core.d, polys, bounds: b, center, thickness, depth, rxy, rz,
+      kind, frame, d: core.d, polys, bounds: b, center, thickness, depth, rxy, rz,
       axis: kind === 'revolve-x' ? (xAxis as number) : kind === 'revolve-y' ? center[0] : undefined,
       zSlices, xSlices, height,
     };
   });
 
   const eyeScale = boostedEyeScale(body, def.eyes);
-  // The eyes ride on whichever part is highest under their centers.
+  // The eyes ride on whichever part is highest under their centers (a v2 part's depth offset counts).
   const centers = eyeCenters(def.eyes);
   let eyePart = 0, bestZ = -Infinity;
   parts.forEach((part, i) => {
     const zs = centers.map(([x, y]) => part.height(x, y));
     if (zs.some((z) => z <= 0)) return;
-    const z = Math.min(...zs);
+    const z = Math.min(...zs) + part.frame.z;
     if (z > bestZ) { bestZ = z; eyePart = i; }
   });
   const host = parts[eyePart];

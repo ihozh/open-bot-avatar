@@ -1,6 +1,6 @@
 import { bounds, filledArea, flattenPath, insideRow, isInside, parsePath, PathError, serializePath, splitSubpaths } from './path.ts';
 import type { Bounds, Point } from './path.ts';
-import type { AvatarEyes, ValidationResult } from './types.ts';
+import type { AvatarDefinition, AvatarEyes, AvatarPartFrame, ValidationResult } from './types.ts';
 
 /** Neutral eye size at scale 1, viewBox units. */
 export const EYE_W = 4;
@@ -25,8 +25,12 @@ export const HAPPY_ARC = { halfWidth: 0.72, base: 0.1, peak: 0.42, stroke: 0.6 }
 /** Gap the renderer keeps between every drawn eye shape and the outline while the eyes look around. */
 export const EYE_CLEARANCE = 1.5;
 
-const TOP_KEYS = ['version', 'id', 'name', 'body', 'eyes'];
+const TOP_KEYS = ['version', 'id', 'name', 'body', 'eyes', 'parts'];
 const EYE_KEYS = ['x', 'y', 'spacing', 'scale'];
+const PART_KEYS = ['z', 'yaw', 'pitch', 'pivot'];
+/** v2 part frames: depth offset and tilt limits. */
+export const PART_Z_MAX = 30;
+export const PART_ANGLE_MAX = 75;
 
 export interface BodyHole {
   /** The hole's own subpath, serialized. */
@@ -199,8 +203,39 @@ export function validateAvatar(input: unknown): ValidationResult {
   const errors: string[] = [];
   if (!isRecord(input)) return { ok: false, errors: ['definition must be a JSON object'] };
 
-  for (const k of Object.keys(input)) if (!TOP_KEYS.includes(k)) errors.push(`unknown field "${k}" (allowed: ${TOP_KEYS.join(', ')})`);
-  if (input.version !== 1) errors.push('version must be 1');
+  const version = input.version === 2 ? 2 : 1;
+  const allowed = version === 2 ? TOP_KEYS : TOP_KEYS.filter((k) => k !== 'parts');
+  for (const k of Object.keys(input)) if (!allowed.includes(k)) errors.push(`unknown field "${k}" (allowed: ${allowed.join(', ')})`);
+  if (input.version !== 1 && input.version !== 2) errors.push('version must be 1 or 2');
+
+  // v2: optional depth frames, one per outline subpath (checked against the body below).
+  let parts: AvatarPartFrame[] | null = null;
+  if (version === 2 && input.parts !== undefined) {
+    if (!Array.isArray(input.parts)) errors.push('parts must be an array of { z?, yaw?, pitch?, pivot? }');
+    else {
+      parts = [];
+      input.parts.forEach((p: unknown, i: number) => {
+        if (!isRecord(p)) { errors.push(`parts[${i}] must be an object`); return; }
+        for (const k of Object.keys(p)) if (!PART_KEYS.includes(k)) errors.push(`unknown field "parts[${i}].${k}" (allowed: ${PART_KEYS.join(', ')})`);
+        const frame: AvatarPartFrame = {};
+        for (const k of ['z', 'yaw', 'pitch'] as const) {
+          if (p[k] === undefined) continue;
+          const v = p[k];
+          const max = k === 'z' ? PART_Z_MAX : PART_ANGLE_MAX;
+          if (!num(v)) errors.push(`parts[${i}].${k} must be a finite number`);
+          else if (Math.abs(v) > max) errors.push(`parts[${i}].${k} ${v} out of range -${max}..${max}`);
+          else if (v !== 0) frame[k] = r1(v);
+        }
+        if (p.pivot !== undefined) {
+          const pv = p.pivot;
+          if (!Array.isArray(pv) || pv.length !== 2 || !num(pv[0]) || !num(pv[1])) errors.push(`parts[${i}].pivot must be [x, y]`);
+          else if (pv[0] < 0 || pv[0] > 100 || pv[1] < 0 || pv[1] > 100) errors.push(`parts[${i}].pivot must lie within the 0..100 canvas`);
+          else frame.pivot = [r1(pv[0]), r1(pv[1])];
+        }
+        (parts as AvatarPartFrame[]).push(frame);
+      });
+    }
+  }
 
   const id = input.id;
   if (typeof id !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(id)) {
@@ -263,6 +298,11 @@ export function validateAvatar(input: unknown): ValidationResult {
     }
     if (body.area < 600) errors.push(`body fill area ${body.area} is too thin to carry eyes; must be at least 600 units²`);
 
+    if (parts) {
+      const outlines = body.subpaths.filter((s) => !s.hole).length;
+      if (parts.length > outlines) errors.push(`parts has ${parts.length} entries but the body has only ${outlines} outline subpath${outlines === 1 ? '' : 's'}`);
+    }
+
     if (eyes) {
       const miss = eyesFit(body.polys, eyes, 0, 0, EYE_MARGIN);
       if (miss) {
@@ -275,8 +315,7 @@ export function validateAvatar(input: unknown): ValidationResult {
   }
 
   if (errors.length || !eyes) return { ok: false, errors };
-  return {
-    ok: true,
-    value: { version: 1, id: id as string, name, body: { path: normalized }, eyes: { ...eyes } },
-  };
+  const value: AvatarDefinition = { version, id: id as string, name, body: { path: normalized }, eyes: { ...eyes } };
+  if (parts) value.parts = parts;
+  return { ok: true, value };
 }

@@ -81,7 +81,8 @@ function mountScene(el: HTMLElement, definition: AvatarDefinition, depth: number
     motion: q('[data-motion]'),
     view: q('[data-view]'),
     stacks,
-    slices: { z: [...stacks.z.children] as HTMLElement[], x: [...stacks.x.children] as HTMLElement[] },
+    // Slices sit inside per-part wrappers (which carry v2 depth frames), in the same order as the frame lists them.
+    slices: { z: [...stacks.z.querySelectorAll('svg')] as HTMLElement[], x: [...stacks.x.querySelectorAll('svg')] as HTMLElement[] },
     eyes: [0, 1].map((i) => {
       const root = q(`[data-eye="${i}"]`);
       return { root, pill: root.querySelector('i') as HTMLElement, arc: root.querySelector('svg') as unknown as HTMLElement };
@@ -100,11 +101,12 @@ function put(m: Scene, key: string, el: HTMLElement, prop: 'transform' | 'visibi
 function apply(m: Scene, frame: SceneFrame) {
   put(m, 'motion', m.motion, 'transform', frame.motion);
   put(m, 'view', m.view, 'transform', frame.view);
-  // display:none, not visibility: hidden slices would still each hold a 3D layer.
-  put(m, 'z', m.stacks.z, 'display', frame.stack === 'z' ? 'block' : 'none');
-  put(m, 'x', m.stacks.x, 'display', frame.stack === 'x' ? 'block' : 'none');
-  const slices = m.slices[frame.stack];
-  frame.slices.forEach((shown, i) => slices[i] && put(m, `${frame.stack}${i}`, slices[i], 'display', shown ? 'block' : 'none'));
+  // display:none, not visibility: hidden slices would still each hold a 3D layer. Each part shows one
+  // stack, so both stack containers stay mounted and every slice is switched on its own.
+  for (const axis of ['z', 'x'] as const) {
+    const slices = m.slices[axis];
+    frame.slices[axis].forEach((shown, i) => slices[i] && put(m, `${axis}${i}`, slices[i], 'display', shown ? 'block' : 'none'));
+  }
   frame.eyes.forEach((eye, i) => {
     const e = m.eyes[i];
     put(m, `e${i}`, e.root, 'transform', eye.transform);
@@ -123,7 +125,7 @@ const keys = new WeakMap<object, string>();
 function geometryKey(definition: AvatarDefinition): string {
   let key = keys.get(definition);
   if (key === undefined) {
-    key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes]);
+    key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes, definition?.parts ?? null]);
     keys.set(definition, key);
   }
   return key;

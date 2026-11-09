@@ -17,8 +17,25 @@ export interface AvatarEyes {
   scale: number;
 }
 
+/**
+ * v2: where one part (one filled outline subpath, in path order, holes not
+ * counted) sits in depth. Every field is optional; a missing frame is the v1
+ * placement (centered on the mid-plane, upright).
+ */
+export interface AvatarPartFrame {
+  /** Offset of the part's own mid-plane toward the viewer, viewBox units (-30..30). */
+  z?: number;
+  /** Turn about the part's vertical axis through `pivot`, degrees (-75..75). Positive brings the part's right edge toward the viewer. */
+  yaw?: number;
+  /** Tip about the part's horizontal axis through `pivot`, degrees (-75..75). Positive leans the part's top toward the viewer. */
+  pitch?: number;
+  /** Point the part turns about, viewBox units. Defaults to the part's bounding-box center. */
+  pivot?: [number, number];
+}
+
 export interface AvatarDefinition {
-  version: 1;
+  /** 1: flat contract. 2: adds optional `parts` depth frames. */
+  version: 1 | 2;
   /** Lowercase slug, e.g. "controller". */
   id: string;
   /** Human-readable display name. */
@@ -26,6 +43,8 @@ export interface AvatarDefinition {
   /** One filled path, nonzero fill rule; holes wind opposite to their outline. */
   body: { path: string };
   eyes: AvatarEyes;
+  /** v2 only: one frame per outline subpath, in path order; shorter arrays leave the rest at the default. */
+  parts?: AvatarPartFrame[];
 }
 
 export type AvatarMotion = 'idle' | 'thinking' | 'happy';
