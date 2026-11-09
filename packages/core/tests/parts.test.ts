@@ -10,6 +10,7 @@ import {
   avatarFrame,
   partProjection,
   partXPlane,
+  partYPlane,
   partZPlane,
   planeMatrix,
   renderAvatarScene,
@@ -18,7 +19,7 @@ import {
   sidePlaneMatrix,
   viewBasis,
 } from '../src/render.ts';
-import { PART_ANGLE_MAX, PART_Z_MAX, validateAvatar } from '../src/validate.ts';
+import { PART_ANGLE_MAX, PART_Z_MAX, analyzeBody, validateAvatar } from '../src/validate.ts';
 import { buildVolume } from '../src/volume.ts';
 import type { Point } from '../src/path.ts';
 import type { AvatarDefinition } from '../src/types.ts';
@@ -88,42 +89,68 @@ describe('validateAvatar parts', () => {
     const twice = validateAvatar(once.value);
     if (!twice.ok) throw new Error(twice.errors.join());
     expect(twice.value).toEqual(once.value);
-    expect(once.value.parts).toHaveLength(3);
+    expect(once.value.parts).toHaveLength(ram.parts!.length);
   });
 });
 
 describe('gallery/ram.json', () => {
-  it('validates, builds moved frames and renders every mode', () => {
+  const deg = (d: number) => (d * Math.PI) / 180;
+
+  it('validates, builds the frames it declares and renders every mode', () => {
     expect(errorsOf(ram)).toEqual([]);
     const vol = buildVolume(ram);
-    expect(vol.parts).toHaveLength(3);
-    expect(vol.parts[0].frame.moved).toBe(false);
-    for (const i of [1, 2]) {
+    const declared = ram.parts!;
+    expect(vol.parts.length).toBeGreaterThanOrEqual(declared.length);
+    declared.forEach((d, i) => {
       const f = vol.parts[i].frame;
-      expect(f.moved).toBe(true);
-      expect(f.z).toBe(16);
-      expect(f.pitch).toBeCloseTo((35 * Math.PI) / 180);
-      expect(Math.abs(f.yaw)).toBeCloseTo((30 * Math.PI) / 180);
-    }
-    // Eyes stay on the head, not on a horn that now sits in front of it.
+      const moved = (d.z ?? 0) !== 0 || (d.pitch ?? 0) !== 0 || (d.yaw ?? 0) !== 0;
+      expect(f.moved, `part ${i}`).toBe(moved);
+      expect(f.z, `part ${i}`).toBe(d.z ?? 0);
+      expect(f.pitch, `part ${i}`).toBeCloseTo(deg(d.pitch ?? 0));
+      expect(f.yaw, `part ${i}`).toBeCloseTo(deg(d.yaw ?? 0));
+      if (d.pivot) expect(f.pivot, `part ${i}`).toEqual(d.pivot);
+      // Only pitched parts carry horizontal cross-sections.
+      expect(vol.parts[i].ySlices.length > 0, `part ${i} y-slices`).toBe((d.pitch ?? 0) !== 0);
+    });
+    expect(declared.some((d) => (d.pitch ?? 0) !== 0)).toBe(true);
+    // Eyes stay on the head (the first, unmoved outline), not on a horn that now sits in front of it.
     expect(vol.eyePart).toBe(0);
 
     const svg = renderAvatarSvg(ram);
     expect(svg).toContain('<svg');
     expect(svg).not.toMatch(/NaN|undefined|Infinity/);
+    const total = vol.parts.reduce((n, p) => n + p.zSlices.length + p.xSlices.length + p.ySlices.length, 0);
     for (const [yaw, pitch] of [[0, 0], [Math.PI / 2, 0], [0, -1.2], [0.6, 0.3]]) {
       const frame = avatarFrame(ram, { reducedMotion: true, view: { yaw, pitch } });
       expect(JSON.stringify(frame)).not.toMatch(/NaN|undefined|Infinity/);
       const scene = sceneFrame(ram, { reducedMotion: true, view: { yaw, pitch } });
-      expect(scene.slices.z.length + scene.slices.x.length).toBe(vol.parts.reduce((n, p) => n + p.zSlices.length + p.xSlices.length, 0));
-      expect(scene.slices.z.some(Boolean) || scene.slices.x.some(Boolean)).toBe(true);
+      expect(scene.slices.z.length + scene.slices.x.length + scene.slices.y.length).toBe(total);
+      expect(scene.slices.z.some(Boolean) || scene.slices.x.some(Boolean) || scene.slices.y.some(Boolean)).toBe(true);
     }
     const html = renderAvatarScene(ram);
-    expect(html).toContain('data-part="1"');
-    // The horn wrappers carry the frame: z shift, then the turn, in radians about the pivot.
-    expect(html).toMatch(/data-part="1" style="[^"]*transform-origin:34cqw 36cqw 0;transform:translateZ\(16cqw\) rotateY\(0\.5236rad\) rotateX\(-0\.6109rad\)/);
-    expect(html).toMatch(/data-part="2" style="[^"]*rotateY\(-0\.5236rad\)/);
+    expect(html).toContain('data-stack="y"');
+    const tip = declared.findIndex((d) => (d.pitch ?? 0) !== 0);
+    const t = declared[tip];
+    const re = new RegExp(`data-part="${tip}" style="[^"]*transform-origin:${t.pivot![0]}cqw ${t.pivot![1]}cqw 0;transform:translateZ\\(${t.z}cqw\\) rotateY\\(${(-deg(t.yaw ?? 0)).toFixed(4).replace('-0.0000', '0')}rad\\) rotateX\\(${(-deg(t.pitch!)).toFixed(4)}rad\\)`);
+    expect(html).toMatch(re);
     expect(html).toContain('data-eyes');
+  });
+
+  it('pitched horn tips face the viewer through their y-planes when seen from the front', () => {
+    const vol = buildVolume(ram);
+    const pivot = pivotOf(vol.bounds);
+    const v = viewBasis(0, 0);
+    const tip = ram.parts!.findIndex((d) => Math.abs(d.pitch ?? 0) >= 60);
+    expect(tip).toBeGreaterThan(0);
+    const P = partProjection(v, pivot, vol.parts[tip].frame, true);
+    expect(P.stack).toBe('y');
+    // Without y-slices the same part would have to fall back to z or x planes.
+    expect(partProjection(v, pivot, vol.parts[tip].frame, false).stack).not.toBe('y');
+    // Every distinct y-slice path has its own id in the still render.
+    const svg = renderAvatarSvg(ram);
+    const ids = [...svg.matchAll(/<path id="([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(svg).not.toContain('href="#undefined"');
   });
 
   it('is not the same picture as the flat v1 reading of the same body', () => {
@@ -132,6 +159,23 @@ describe('gallery/ram.json', () => {
     expect(errorsOf(flat)).toEqual([]);
     const view = { yaw: Math.PI / 2, pitch: 0 };
     expect(renderAvatarSvg(ram, { view })).not.toBe(renderAvatarSvg(flat, { view }));
+  });
+});
+
+describe('holes', () => {
+  it('cut exactly one part each: the ring horns stay open, the head and wool stay solid', () => {
+    const vol = buildVolume(ram);
+    const holes = analyzeBody(ram.body.path).subpaths.filter((s) => s.hole).length;
+    expect(holes).toBeGreaterThan(0);
+    const cut = vol.parts.map((p) => p.polys.length - 1);
+    expect(cut.reduce((n, c) => n + c, 0)).toBe(holes);
+    // The head (first part) carries no hole even though the horns sit in front of it.
+    expect(cut[0]).toBe(0);
+    const rings = cut.flatMap((c, i) => (c > 0 ? [i] : []));
+    for (const i of rings) {
+      const { center } = vol.parts[i];
+      expect(vol.parts[i].height(center[0], center[1]), `ring ${i} open at its center`).toBe(0);
+    }
   });
 });
 
@@ -155,16 +199,39 @@ describe('partProjection', () => {
     }
   });
 
+  it('partYPlane maps the horizontal plane consistently with partZPlane', () => {
+    const vol = buildVolume(ram);
+    const pivot = pivotOf(vol.bounds);
+    for (const [yaw, pitch] of views) {
+      const v = viewBasis(yaw, pitch);
+      for (const part of vol.parts) {
+        const P = partProjection(v, pivot, part.frame, true);
+        for (const at of [-9, 0, 11]) {
+          const Y = partYPlane(P, at);
+          // A y-plane point (x, w = -z) at local y = at is the local point (x, at, -w).
+          for (const [x, w] of [[12, 0], [0, 7], [-5, -3]]) {
+            const Z = partZPlane(P, -w);
+            const fromZ = [Z[0] * x + Z[2] * at + Z[4], Z[1] * x + Z[3] * at + Z[5]];
+            const fromY = [Y[0] * x + Y[2] * w + Y[4], Y[1] * x + Y[3] * w + Y[5]];
+            expect(Math.abs(fromY[0] - fromZ[0])).toBeLessThan(1e-9);
+            expect(Math.abs(fromY[1] - fromZ[1])).toBeLessThan(1e-9);
+          }
+        }
+      }
+    }
+  });
+
   it('shifts a part by z straight toward the viewer when facing front', () => {
     const vol = buildVolume(ram);
     const pivot = pivotOf(vol.bounds);
     const v = viewBasis(0, 0);
+    const i = ram.parts!.findIndex((d) => (d.z ?? 0) !== 0 && d.pivot);
     const head = partProjection(v, pivot, vol.parts[0].frame);
-    const horn = partProjection(v, pivot, vol.parts[1].frame);
+    const horn = partProjection(v, pivot, vol.parts[i].frame);
     // Depth of the horn's pivot (which the tilt leaves in place) is z closer than the head plane.
-    const [px, py] = vol.parts[1].frame.pivot;
+    const [px, py] = vol.parts[i].frame.pivot;
     const depth = (P: typeof head) => P.l[6] * px + P.l[7] * py + P.t[2];
-    expect(depth(horn) - depth(head)).toBeCloseTo(16, 9);
+    expect(depth(horn) - depth(head)).toBeCloseTo(ram.parts![i].z!, 9);
     // And the pivot stays put on screen.
     expect(horn.l[0] * px + horn.l[1] * py + horn.t[0]).toBeCloseTo(px, 9);
     expect(horn.l[3] * px + horn.l[4] * py + horn.t[1]).toBeCloseTo(py, 9);
