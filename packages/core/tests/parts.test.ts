@@ -31,7 +31,8 @@ const errorsOf = (input: unknown) => {
 };
 /** The body pivot the view rotates about: the center of the whole body's bounds (as render.ts does). */
 const pivotOf = (b: { minX: number; maxX: number; minY: number; maxY: number }): Point => [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2];
-const ram = JSON.parse(readFileSync('gallery/ram.json', 'utf8')) as AvatarDefinition;
+// The sheep that used to be gallery/ram.json: head, wool, two ring horns and two pitched tips, all as v2 parts.
+const ram = JSON.parse(readFileSync('packages/core/tests/fixtures/sheep-parts.json', 'utf8')) as AvatarDefinition;
 const bull = getExample('bull') ?? examples[0];
 
 describe('v2 without parts', () => {
@@ -93,7 +94,7 @@ describe('validateAvatar parts', () => {
   });
 });
 
-describe('gallery/ram.json', () => {
+describe('sheep fixture (v2 parts)', () => {
   const deg = (d: number) => (d * Math.PI) / 180;
 
   it('validates, builds the frames it declares and renders every mode', () => {

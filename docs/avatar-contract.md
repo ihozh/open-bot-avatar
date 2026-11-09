@@ -44,6 +44,30 @@ Version 1 places every part on one mid-plane (z = 0), so a body can only be as d
 - Renderers (`avatarFrame`, `renderAvatarSvg`, the CSS scene) pick the slice stack per part, so a tilted part still shows a solid silhouette from every view. A part with a `pitch` also gets horizontal (y-plane) cross-sections, because its z- and x-planes turn edge-on together once it leans far forward. `avatarExtent` grows to hold the offset parts.
 - A part is still one flat shape turned in space. To make something curve toward the viewer, chain parts: the ram's horn is a frontal spiral plus a separate tip part pitched −72° at the spiral's end.
 
+## v2: tubes
+
+A part is a flat shape with inferred thickness, so a horn that grows out of the head, bends forward and tapers cannot be built from `parts` alone. Version 2 adds an optional `tubes` array: solid tubes swept along a curve in space, drawn after the body's outline parts.
+
+```json
+{
+  "version": 2,
+  "id": "ram",
+  "name": "Ram",
+  "body": { "path": "<head>Z" },
+  "tubes": [
+    { "path": [[36,34,0],[30,26,6],[22,30,16],[18,41,26],[22,51,32]], "radius": [7, 2] },
+    { "path": [[64,34,0],[70,26,6],[78,30,16],[82,41,26],[78,51,32]], "radius": [7, 2] }
+  ],
+  "eyes": { "x": 50, "y": 60, "spacing": 16, "scale": 1.1 }
+}
+```
+
+- `path`: 2..16 control points `[x, y, z]`. `x`, `y` are viewBox units; `z` is depth, **positive toward the viewer**, `|z| ≤ 40`. The tube follows a Catmull-Rom spline through every control point (the end points are repeated at the ends).
+- `radius` (0.5..15): one number for a constant radius, `[root, tip]` for a linear taper over arc length, or one number per control point. Normalization writes it as `[root, tip]` or the per-point array, with every number rounded to one decimal.
+- Safe area: for every control point, `x ± r` and `y ± r` must lie within 8..92. At most 8 tubes.
+- Rendering: a tube is approximated by a chain of overlapping spheres, so it reads as solid from any angle. In `avatarFrame` each sphere is one disc (the unit circle scaled by its radius) placed at the projected centre and sorted by depth with everything else; the CSS scene draws one disc per sphere and keeps them facing the viewer. Tubes contribute to the eye host (the eyes ride on whatever is highest under them) and to `avatarExtent`. The `depth` option scales their `z` as it scales the body's inferred depth.
+- A v2 definition without `tubes` renders exactly as before.
+
 Before rendering imported definitions, call `validateAvatar`. It returns `{ ok: true, value }` with the normalized definition or `{ ok: false, errors }` with validation errors.
 
 ## Strict targets for generated avatars

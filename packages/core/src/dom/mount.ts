@@ -68,6 +68,8 @@ interface Scene {
   view: HTMLElement;
   stacks: Record<Stack, HTMLElement>;
   slices: Record<Stack, HTMLElement[]>;
+  /** Container of the tube spheres, when the definition has tubes. */
+  tubes: HTMLElement | null;
   eyes: { root: HTMLElement; pill: HTMLElement; arc: HTMLElement }[];
   last: Record<string, string>;
 }
@@ -88,6 +90,7 @@ function mountScene(el: HTMLElement, definition: AvatarDefinition, depth: number
       x: [...stacks.x.querySelectorAll('svg')] as unknown as HTMLElement[],
       y: [...stacks.y.querySelectorAll('svg')] as unknown as HTMLElement[],
     },
+    tubes: el.querySelector('[data-tubes]') as HTMLElement | null,
     eyes: [0, 1].map((i) => {
       const root = q(`[data-eye="${i}"]`);
       return { root, pill: root.querySelector('i') as HTMLElement, arc: root.querySelector('svg') as unknown as HTMLElement };
@@ -112,6 +115,10 @@ function apply(m: Scene, frame: SceneFrame) {
     const slices = m.slices[axis];
     frame.slices[axis].forEach((shown, i) => slices[i] && put(m, `${axis}${i}`, slices[i], 'display', shown ? 'block' : 'none'));
   }
+  if (m.tubes && m.last.billboard !== frame.billboard) {
+    m.last.billboard = frame.billboard;
+    m.tubes.style.setProperty('--billboard', frame.billboard);
+  }
   frame.eyes.forEach((eye, i) => {
     const e = m.eyes[i];
     put(m, `e${i}`, e.root, 'transform', eye.transform);
@@ -130,7 +137,7 @@ const keys = new WeakMap<object, string>();
 function geometryKey(definition: AvatarDefinition): string {
   let key = keys.get(definition);
   if (key === undefined) {
-    key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes, definition?.parts ?? null]);
+    key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes, definition?.parts ?? null, definition?.tubes ?? null]);
     keys.set(definition, key);
   }
   return key;

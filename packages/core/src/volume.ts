@@ -23,9 +23,20 @@ import { bounds, insideRow, isInside } from './path.ts';
 import type { Bounds, Point } from './path.ts';
 import { EYE_H, EYE_W, GAZE_X, GAZE_Y, analyzeBody, drawnEyesFit, eyeCenters, eyeClearance, gazeRange } from './validate.ts';
 import type { BodyAnalysis, GazeRange } from './validate.ts';
-import type { AvatarDefinition, AvatarEyes } from './types.ts';
+import type { AvatarDefinition, AvatarEyes, AvatarTube } from './types.ts';
 
-export type PartKind = 'inflate' | 'revolve-x' | 'revolve-y';
+export type PartKind = 'inflate' | 'revolve-x' | 'revolve-y' | 'tube';
+
+/** One sphere of a tube's chain: center in model space (z toward the viewer) and radius. */
+export interface Ball {
+  x: number;
+  y: number;
+  z: number;
+  r: number;
+}
+
+/** Longest chain a single tube is sampled into. */
+export const TUBE_BALLS_MAX = 64;
 
 /** The three families of cross-section planes a part can be drawn with. */
 export type Stack = 'z' | 'x' | 'y';
@@ -80,6 +91,8 @@ export interface VolumePart {
   xSlices: VolumeSlice[];
   /** Horizontal cross-sections; empty unless the part's frame has a pitch. */
   ySlices: VolumeSlice[];
+  /** Tubes only: the spheres that approximate the tube, root to tip. Tube parts carry no slices. */
+  balls?: Ball[];
   /** Front surface height at a point, 0 outside the part. */
   height: (x: number, y: number) => number;
 }
@@ -530,6 +543,89 @@ function levels(flat: number, round: number, steps: number): number[] {
 }
 
 /** Build the implied volume. `volume` scales every depth (0 = flat). Pass `body` to reuse an analysis. */
+/** Catmull-Rom point between p1 and p2 (p0, p3 the neighbours; endpoints are repeated at the ends). */
+function catmullRom(p0: number[], p1: number[], p2: number[], p3: number[], t: number): [number, number, number] {
+  const t2 = t * t, t3 = t2 * t;
+  const at = (k: number) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3);
+  return [at(0), at(1), at(2)];
+}
+
+/**
+ * Sample a tube into a chain of overlapping spheres: the spline is walked at a fine step and a
+ * sphere is placed whenever the arc length since the last one exceeds max(0.8, 0.45·r), so
+ * neighbours always overlap (centre distance under half the sum of their radii). The depth option
+ * scales z, so depth 0 lays the tube flat, as it does the body's parts.
+ */
+export function tubeBalls(tube: AvatarTube, zScale = 1): Ball[] {
+  const pts = tube.path.map(([x, y, z]) => [x, y, z * zScale]);
+  const n = pts.length;
+  const P = (i: number) => pts[Math.min(n - 1, Math.max(0, i))];
+  // Fine polyline along the spline with cumulative arc length.
+  const fine: { p: [number, number, number]; s: number }[] = [{ p: [pts[0][0], pts[0][1], pts[0][2]], s: 0 }];
+  for (let i = 0; i < n - 1; i++) {
+    for (let k = 1; k <= 16; k++) {
+      const q = catmullRom(P(i - 1), P(i), P(i + 1), P(i + 2), k / 16);
+      const last = fine[fine.length - 1];
+      fine.push({ p: q, s: last.s + Math.hypot(q[0] - last.p[0], q[1] - last.p[1], q[2] - last.p[2]) });
+    }
+  }
+  const total = fine[fine.length - 1].s;
+  const rad = tube.radius;
+  const radii: number[] = typeof rad === 'number' ? [rad, rad] : rad;
+  // Radius over arc length: root-to-tip linear, or per control point (linear between the knots).
+  const knots = radii.length === n && n > 2 ? fine.filter((_, i) => i % 16 === 0).map((f) => f.s) : [0, total];
+  const radiusAt = (s: number) => {
+    if (knots.length === 2) return radii[0] + (radii[1] - radii[0]) * (total > 0 ? s / total : 0);
+    let i = 0;
+    while (i < knots.length - 2 && s > knots[i + 1]) i++;
+    const span = knots[i + 1] - knots[i];
+    const t = span > 0 ? Math.min(1, Math.max(0, (s - knots[i]) / span)) : 0;
+    return radii[i] + (radii[i + 1] - radii[i]) * t;
+  };
+  const balls: Ball[] = [];
+  let next = 0;
+  for (const f of fine) {
+    if (f.s < next && balls.length) continue;
+    const r = radiusAt(f.s);
+    balls.push({ x: f.p[0], y: f.p[1], z: f.p[2], r });
+    next = f.s + Math.max(0.8, 0.45 * r);
+    if (balls.length === TUBE_BALLS_MAX) break;
+  }
+  // Always end on the tip.
+  const tip = fine[fine.length - 1];
+  const last = balls[balls.length - 1];
+  if (balls.length < TUBE_BALLS_MAX && Math.hypot(tip.p[0] - last.x, tip.p[1] - last.y, tip.p[2] - last.z) > 0.2) balls.push({ x: tip.p[0], y: tip.p[1], z: tip.p[2], r: radiusAt(total) });
+  return balls;
+}
+
+/** A tube as a part of the volume: no cross-sections, just its spheres; front height is the spheres' union. */
+function tubePart(tube: AvatarTube, zScale: number): VolumePart {
+  const balls = tubeBalls(tube, zScale);
+  const b: Bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  let zMin = Infinity, zMax = -Infinity, thickness = 0;
+  for (const q of balls) {
+    b.minX = Math.min(b.minX, q.x - q.r); b.maxX = Math.max(b.maxX, q.x + q.r);
+    b.minY = Math.min(b.minY, q.y - q.r); b.maxY = Math.max(b.maxY, q.y + q.r);
+    zMin = Math.min(zMin, q.z - q.r); zMax = Math.max(zMax, q.z + q.r);
+    thickness = Math.max(thickness, 2 * q.r);
+  }
+  const center: Point = [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2];
+  const height = (x: number, y: number) => {
+    let top = 0;
+    for (const q of balls) {
+      const d2 = q.r * q.r - (x - q.x) ** 2 - (y - q.y) ** 2;
+      if (d2 > 0) top = Math.max(top, q.z + Math.sqrt(d2));
+    }
+    return top;
+  };
+  return {
+    kind: 'tube',
+    frame: { z: 0, yaw: 0, pitch: 0, pivot: center, moved: false },
+    d: '', polys: [], bounds: b, center, thickness, depth: zMax - zMin, rxy: 0, rz: 0,
+    zSlices: [], xSlices: [], ySlices: [], balls, height,
+  };
+}
+
 export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysis = analyzeBody(def.body.path)): Volume {
   const outlines = body.subpaths.filter((s) => !s.hole);
   const holes = body.subpaths.filter((s) => s.hole);
@@ -666,6 +762,15 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
     };
   });
 
+  // v2 tubes follow the outline parts, in their own order.
+  if (def.version === 2 && def.tubes) for (const tube of def.tubes) parts.push(tubePart(tube, v));
+  const allBounds: Bounds = { ...body.bounds };
+  for (const part of parts) {
+    if (part.kind !== 'tube') continue;
+    allBounds.minX = Math.min(allBounds.minX, part.bounds.minX); allBounds.maxX = Math.max(allBounds.maxX, part.bounds.maxX);
+    allBounds.minY = Math.min(allBounds.minY, part.bounds.minY); allBounds.maxY = Math.max(allBounds.maxY, part.bounds.maxY);
+  }
+
   const eyeScale = boostedEyeScale(body, def.eyes);
   // The eyes ride on whichever part is highest under their centers (a v2 part's depth offset counts).
   const centers = eyeCenters(def.eyes);
@@ -696,7 +801,7 @@ export function buildVolume(def: AvatarDefinition, volume = 1, body: BodyAnalysi
   const half = (EYE_W * eyeScale) / 2;
   const eyeNormals = centers.map(([x, y]) => [normal(x - half, y), normal(x, y), normal(x + half, y)]) as [Vec3[], Vec3[]];
 
-  return { parts, bounds: body.bounds, eyePart, eyeZ, eyeScale, eyeNormals };
+  return { parts, bounds: allBounds, eyePart, eyeZ, eyeScale, eyeNormals };
 }
 
 /** Largest eye scale up to EYE_BOOST × the definition's whose drawn eyes keep EYE_BOOST_PAD from the outline. */

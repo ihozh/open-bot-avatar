@@ -23,7 +23,7 @@ import type { Bounds, Point } from './path.ts';
 import { EYE_H, EYE_W, GAZE_X, GAZE_Y, HAPPY_ARC, analyzeBody, eyeCenters, gazeRange, validateAvatar } from './validate.ts';
 import type { GazeRange } from './validate.ts';
 import { buildVolume } from './volume.ts';
-import type { PartFrame, Stack, Volume, VolumeSlice } from './volume.ts';
+import type { Ball, PartFrame, Stack, Volume, VolumeSlice } from './volume.ts';
 import type { AvatarDefinition, RenderOptions } from './types.ts';
 
 export const DEFAULT_COLOR = '#ff6a1a';
@@ -38,6 +38,12 @@ const MAX_DEPTH = 14;
  * drifts lift × sin(angle) from its spot: under half a unit at rest, about one at 45°.
  */
 const EYE_LIFT = 1.5;
+
+/** Unit circle centred on the origin: a tube's spheres as seen from any direction. */
+export const UNIT_CIRCLE = 'M1 0A1 1 0 1 1 -1 0A1 1 0 1 1 1 0Z';
+const UNIT_CIRCLE_BOX = { x: -1, y: -1, w: 2, h: 2 };
+/** Below this projected radius (CSS px) a live tube may skip every other sphere. */
+const BALL_MIN_PX = 0.6;
 
 interface Prepared {
   def: AvatarDefinition;
@@ -66,7 +72,7 @@ function depthOption(options: RenderOptions): number {
 }
 
 function prepare(definition: AvatarDefinition, depth: number): Prepared {
-  const key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes, definition?.parts ?? null, depth]);
+  const key = JSON.stringify([definition?.id, definition?.name, definition?.body?.path, definition?.eyes, definition?.parts ?? null, definition?.tubes ?? null, depth]);
   const hit = cache.get(key);
   if (hit) return hit;
   const res = validateAvatar(definition);
@@ -74,9 +80,11 @@ function prepare(definition: AvatarDefinition, depth: number): Prepared {
   const def = res.value;
   const body = analyzeBody(def.body.path);
   const vol = buildVolume(def, depth / DEFAULT_DEPTH, body);
-  const id = `oba-${hashString(`${def.id}|${def.body.path}|${def.parts ? JSON.stringify(def.parts) : ''}|${depth}`).toString(36)}`;
+  const id = `oba-${hashString(`${def.id}|${def.body.path}|${def.parts ? JSON.stringify(def.parts) : ''}|${def.tubes ? JSON.stringify(def.tubes) : ''}|${depth}`).toString(36)}`;
   const ids = new Map<string, string>();
   for (const part of vol.parts) for (const s of [...part.zSlices, ...part.xSlices, ...part.ySlices]) if (!ids.has(s.d)) ids.set(s.d, `${id}-${ids.size}`);
+  // Every tube sphere draws the one unit circle, scaled by its radius.
+  if (vol.parts.some((part) => part.kind === 'tube')) ids.set(UNIT_CIRCLE, `${id}-${ids.size}`);
   const prepared: Prepared = {
     def,
     vol,
@@ -314,6 +322,8 @@ export function avatarExtent(definition: AvatarDefinition, depth?: number): { x:
   const [cx, cy] = pivotOf(b);
   // v2 frames move parts off the mid-plane: allow for the depth offset and the swing about the pivot.
   const reach = Math.max(0, ...vol.parts.map((part) => {
+    // A tube's spheres sit anywhere in depth: allow for the farthest centre.
+    if (part.kind === 'tube') return Math.max(0, ...(part.balls ?? []).map((q) => Math.abs(q.z)));
     if (!part.frame.moved) return 0;
     const pb = part.bounds;
     const swing = part.frame.yaw || part.frame.pitch ? Math.hypot(pb.maxX - pb.minX, pb.maxY - pb.minY) / 2 : 0;
@@ -482,6 +492,26 @@ export function liveFrame(definition: AvatarDefinition, options: RenderOptions =
   return flatFrame(definition, options, options.size);
 }
 
+/**
+ * Indices of the spheres a tube draws at a rendered size. Tiny live avatars skip every other
+ * sphere where the chain stays closed (the skipped gap never exceeds the smaller neighbour's radius).
+ */
+function keptBalls(balls: Ball[], size: number | undefined): number[] {
+  const all = balls.map((_, j) => j);
+  if (!Number.isFinite(size) || (size as number) <= 0) return all;
+  const px = (size as number) / 100;
+  if (balls.every((q) => q.r * px >= BALL_MIN_PX)) return all;
+  const kept: number[] = [0];
+  for (let j = 1; j < balls.length - 1; j++) {
+    const prev = balls[kept[kept.length - 1]], next = balls[j + 1];
+    const gap = Math.hypot(next.x - prev.x, next.y - prev.y, next.z - prev.z);
+    if (gap <= Math.min(prev.r, next.r)) continue;
+    kept.push(j);
+  }
+  if (balls.length > 1) kept.push(balls.length - 1);
+  return kept;
+}
+
 function flatFrame(definition: AvatarDefinition, options: RenderOptions, size: number | undefined): AvatarFrame {
   const p = prepare(definition, depthOption(options));
   const { vol } = p;
@@ -504,6 +534,18 @@ function flatFrame(definition: AvatarDefinition, options: RenderOptions, size: n
     const [rx, ry] = i === vol.eyePart ? eyesMid : vol.parts[i].center;
     const depth = stack === 'z' ? partDepth(P, [rx, ry, s.at]) : stack === 'x' ? partDepth(P, [s.at, ry, 0]) : partDepth(P, [rx, s.at, 0]);
     items.push({ depth, shape: { kind: 'slice', key: `${i}${stack}${j}`, path: path.id, matrix: m } });
+  });
+  // Tubes: one billboard disc per sphere, in front of its centre so a nearer sphere covers a farther one.
+  const pivot = pivotOf(b);
+  vol.parts.forEach((part, i) => {
+    if (part.kind !== 'tube' || !part.balls) return;
+    const circleId = p.ids.get(UNIT_CIRCLE) as string;
+    if (!paths.has(UNIT_CIRCLE)) paths.set(UNIT_CIRCLE, { id: circleId, d: UNIT_CIRCLE, evenOdd: false, box: { ...UNIT_CIRCLE_BOX } });
+    for (const j of keptBalls(part.balls, size)) {
+      const q = part.balls[j];
+      const [sx, sy, depth] = projectPoint(v, [q.x, q.y, q.z], pivot);
+      items.push({ depth: depth + q.r, shape: { kind: 'slice', key: `${i}b${j}`, path: circleId, matrix: [q.r, 0, 0, q.r, sx, sy] } });
+    }
   });
   // Painted on the surface of the host part; each eye goes once the surface under it turns away.
   const host = projections[vol.eyePart];
@@ -611,12 +653,22 @@ export function renderAvatarScene(definition: AvatarDefinition, options: Pick<Re
     );
   });
   const host = vol.parts[vol.eyePart];
+  // Tube spheres: one disc each, kept facing the viewer by the frame's --billboard (set on the container).
+  const balls = vol.parts
+    .map((part, i) =>
+      (part.balls ?? [])
+        .map((q, j) =>
+          `<i data-ball="${i}-${j}" style="position:absolute;left:${u(q.x - q.r)};top:${u(q.y - q.r)};width:${u(2 * q.r)};height:${u(2 * q.r)};` +
+          `border-radius:50%;background:currentColor;transform:translateZ(${u(q.z)}) var(--billboard,)"></i>`)
+        .join(''))
+    .join('');
+  const tubes = balls ? `<div data-tubes style="${FILL}transform-style:preserve-3d">${balls}</div>` : '';
   return (
     `<div data-avatar-scene="${p.id}" style="position:relative;width:100%;height:100%;container-type:size">` +
     // will-change pins the slices' raster scale: without it every hop and squash re-rasterizes each slice.
     `<div data-motion style="${FILL}will-change:transform;transform-origin:${u((b.minX + b.maxX) / 2)} ${u(b.maxY)}">` +
     `<div data-view style="${FILL}transform-style:preserve-3d;transform-origin:${u(cx)} ${u(cy)}">` +
-    stack('z') + stack('x') + stack('y') +
+    stack('z') + stack('x') + stack('y') + tubes +
     // The eyes ride in the host part's frame.
     `<div data-eyes style="${FILL}transform-style:preserve-3d;${host ? partStyle(host.frame) : ''}">${eyes.join('')}</div>` +
     `</div></div></div>`
@@ -634,6 +686,8 @@ export interface SceneFrame {
   stack: 'z' | 'x';
   /** Per slice of each stack, in markup order: whether it shows. Hidden ones need no layer. */
   slices: Record<Stack, boolean[]>;
+  /** Inverse of `view`: set as --billboard on the tube container so every sphere's disc faces the viewer. */
+  billboard: string;
   eyes: { visible: boolean; happy: boolean; transform: string; pill: string }[];
 }
 
@@ -695,6 +749,7 @@ export function sceneFrame(definition: AvatarDefinition, options: RenderOptions 
     view: `rotateX(${r4(pose.pitch)}rad) rotateY(${r4(pose.yaw)}rad)`,
     stack: activeStack(v),
     slices,
+    billboard: `rotateY(${r4(-pose.yaw)}rad) rotateX(${r4(-pose.pitch)}rad)`,
     eyes: states.map((e, i) => ({
       visible: eyeVisible(p.vol, projections[p.vol.eyePart], i),
       happy: e.happy,

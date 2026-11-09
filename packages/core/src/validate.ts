@@ -1,6 +1,6 @@
 import { bounds, filledArea, flattenPath, insideRow, isInside, parsePath, PathError, serializePath, splitSubpaths } from './path.ts';
 import type { Bounds, Point } from './path.ts';
-import type { AvatarDefinition, AvatarEyes, AvatarPartFrame, ValidationResult } from './types.ts';
+import type { AvatarDefinition, AvatarEyes, AvatarPartFrame, AvatarTube, ValidationResult } from './types.ts';
 
 /** Neutral eye size at scale 1, viewBox units. */
 export const EYE_W = 4;
@@ -25,12 +25,23 @@ export const HAPPY_ARC = { halfWidth: 0.72, base: 0.1, peak: 0.42, stroke: 0.6 }
 /** Gap the renderer keeps between every drawn eye shape and the outline while the eyes look around. */
 export const EYE_CLEARANCE = 1.5;
 
-const TOP_KEYS = ['version', 'id', 'name', 'body', 'eyes', 'parts'];
+const TOP_KEYS = ['version', 'id', 'name', 'body', 'eyes', 'parts', 'tubes'];
+const V2_KEYS = ['parts', 'tubes'];
+const TUBE_KEYS = ['path', 'radius'];
 const EYE_KEYS = ['x', 'y', 'spacing', 'scale'];
 const PART_KEYS = ['z', 'yaw', 'pitch', 'pivot'];
 /** v2 part frames: depth offset and tilt limits. */
 export const PART_Z_MAX = 30;
 export const PART_ANGLE_MAX = 75;
+/** v2 tubes: count, control points, radius and depth limits; x ± r and y ± r must stay in TUBE_MIN..TUBE_MAX. */
+export const TUBES_MAX = 8;
+export const TUBE_POINTS_MIN = 2;
+export const TUBE_POINTS_MAX = 16;
+export const TUBE_RADIUS_MIN = 0.5;
+export const TUBE_RADIUS_MAX = 15;
+export const TUBE_Z_MAX = 40;
+export const TUBE_MIN = 8;
+export const TUBE_MAX = 92;
 
 export interface BodyHole {
   /** The hole's own subpath, serialized. */
@@ -204,7 +215,7 @@ export function validateAvatar(input: unknown): ValidationResult {
   if (!isRecord(input)) return { ok: false, errors: ['definition must be a JSON object'] };
 
   const version = input.version === 2 ? 2 : 1;
-  const allowed = version === 2 ? TOP_KEYS : TOP_KEYS.filter((k) => k !== 'parts');
+  const allowed = version === 2 ? TOP_KEYS : TOP_KEYS.filter((k) => !V2_KEYS.includes(k));
   for (const k of Object.keys(input)) if (!allowed.includes(k)) errors.push(`unknown field "${k}" (allowed: ${allowed.join(', ')})`);
   if (input.version !== 1 && input.version !== 2) errors.push('version must be 1 or 2');
 
@@ -233,6 +244,51 @@ export function validateAvatar(input: unknown): ValidationResult {
           else frame.pivot = [r1(pv[0]), r1(pv[1])];
         }
         (parts as AvatarPartFrame[]).push(frame);
+      });
+    }
+  }
+
+  // v2: optional solid tubes swept along a spline.
+  let tubes: AvatarTube[] | null = null;
+  if (version === 2 && input.tubes !== undefined) {
+    if (!Array.isArray(input.tubes)) errors.push('tubes must be an array of { path, radius }');
+    else {
+      if (input.tubes.length > TUBES_MAX) errors.push(`tubes has ${input.tubes.length} entries; at most ${TUBES_MAX} are allowed`);
+      tubes = [];
+      input.tubes.forEach((t: unknown, i: number) => {
+        if (!isRecord(t)) { errors.push(`tubes[${i}] must be an object { path, radius }`); return; }
+        for (const k of Object.keys(t)) if (!TUBE_KEYS.includes(k)) errors.push(`unknown field "tubes[${i}].${k}" (allowed: ${TUBE_KEYS.join(', ')})`);
+        const pts = t.path;
+        if (!Array.isArray(pts) || pts.length < TUBE_POINTS_MIN || pts.length > TUBE_POINTS_MAX || !pts.every((q: unknown) => Array.isArray(q) && q.length === 3 && q.every(num))) {
+          errors.push(`tubes[${i}].path must be ${TUBE_POINTS_MIN}..${TUBE_POINTS_MAX} control points [x, y, z]`);
+          return;
+        }
+        const path = (pts as number[][]).map(([x, y, z]) => [r1(x), r1(y), r1(z)] as [number, number, number]);
+        const rr = t.radius;
+        let radius: [number, number] | number[];
+        if (num(rr)) radius = [rr, rr];
+        else if (Array.isArray(rr) && (rr.length === 2 || rr.length === path.length) && rr.every(num)) radius = rr.map(r1);
+        else {
+          errors.push(`tubes[${i}].radius must be a number, [root, tip] or one number per control point`);
+          return;
+        }
+        radius = radius.map(r1);
+        const badR = radius.filter((r) => r < TUBE_RADIUS_MIN || r > TUBE_RADIUS_MAX);
+        if (badR.length) errors.push(`tubes[${i}].radius ${badR[0]} out of range ${TUBE_RADIUS_MIN}..${TUBE_RADIUS_MAX}`);
+        // Radius at each control point: constant, root-to-tip over the point index (close enough for the
+        // safe-area check; the renderer interpolates over arc length), or per point.
+        const rAt = (k: number) => radius.length === path.length ? radius[k] : radius[0] + (radius[1] - radius[0]) * (path.length > 1 ? k / (path.length - 1) : 0);
+        path.forEach(([x, y, z], k) => {
+          const r = rAt(k);
+          const out: string[] = [];
+          if (x - r < TUBE_MIN) out.push(`x=${r1(x - r)}`);
+          if (x + r > TUBE_MAX) out.push(`x=${r1(x + r)}`);
+          if (y - r < TUBE_MIN) out.push(`y=${r1(y - r)}`);
+          if (y + r > TUBE_MAX) out.push(`y=${r1(y + r)}`);
+          if (out.length) errors.push(`tubes[${i}].path[${k}] leaves the safe area (${out.join(', ')}); keep geometry within ${TUBE_MIN}..${TUBE_MAX}`);
+          if (Math.abs(z) > TUBE_Z_MAX) errors.push(`tubes[${i}].path[${k}] z ${z} out of range -${TUBE_Z_MAX}..${TUBE_Z_MAX}`);
+        });
+        (tubes as AvatarTube[]).push({ path, radius });
       });
     }
   }
@@ -317,5 +373,6 @@ export function validateAvatar(input: unknown): ValidationResult {
   if (errors.length || !eyes) return { ok: false, errors };
   const value: AvatarDefinition = { version, id: id as string, name, body: { path: normalized }, eyes: { ...eyes } };
   if (parts) value.parts = parts;
+  if (tubes) value.tubes = tubes;
   return { ok: true, value };
 }

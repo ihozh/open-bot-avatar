@@ -33,8 +33,24 @@ export interface AvatarPartFrame {
   pivot?: [number, number];
 }
 
+/**
+ * v2: a solid tube swept along a curve in space, for limbs and horns that a
+ * flat part cannot express. The curve is a Catmull-Rom spline through `path`;
+ * the renderer approximates the tube with a chain of overlapping spheres, so
+ * it reads as solid from every view.
+ */
+export interface AvatarTube {
+  /** 2..16 control points [x, y, z]: x, y in viewBox units; z is depth, positive toward the viewer (|z| ≤ 40). */
+  path: [number, number, number][];
+  /**
+   * Radius 0.5..15 along the tube: one number (constant), [root, tip] (linear in arc length), or
+   * one number per control point.
+   */
+  radius: number | [number, number] | number[];
+}
+
 export interface AvatarDefinition {
-  /** 1: flat contract. 2: adds optional `parts` depth frames. */
+  /** 1: flat contract. 2: adds optional `parts` depth frames and `tubes`. */
   version: 1 | 2;
   /** Lowercase slug, e.g. "controller". */
   id: string;
@@ -45,6 +61,8 @@ export interface AvatarDefinition {
   eyes: AvatarEyes;
   /** v2 only: one frame per outline subpath, in path order; shorter arrays leave the rest at the default. */
   parts?: AvatarPartFrame[];
+  /** v2 only: up to 8 solid tubes, drawn after the body's outline parts. */
+  tubes?: AvatarTube[];
 }
 
 export type AvatarMotion = 'idle' | 'thinking' | 'happy';
